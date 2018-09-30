@@ -1,0 +1,238 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Description: DynamoDB & Sagemaker Demo Stack
+Parameters:
+  CodeBucketName:
+    Type: String
+    Description: Enter S3 bucket name where the dynamo backup script you uploaded is
+    Default: CHANGE-ME-lambda-scripts
+  DynamoBackupCodeFileName:
+    Type: String
+    Description: Enter file name of the dynamo backup script
+    Default: backupdynamo.zip
+  BackupBucketName:
+    Type: String
+    Description: Enter S3 location to place CSV backups in
+    Default: CHANGE-ME-dynamo-backups
+  DDBTableName:
+    Type: String
+    Description: Enter DynamoDB Table Name
+    Default: BreastCancerData
+  DDBThroughput:
+    Type: Number
+    Description: Default throughput for new table (read/write same)
+    Default: 5
+  SagemakerBucketName:
+    Type: String
+    Description: Enter a bucket name for sagemaker to store its files
+    Default: CHANGE-ME-sagemaker
+Metadata:
+  'AWS::CloudFormation::Interface':
+    ParameterGroups:
+      - Label:
+          default: Lambda Function
+        Parameters:
+          - CodeBucketName
+          - DynamoBackupCodeFileName
+      - Label:
+          default: DynamoDB Creation and Backup Settings
+        Parameters:
+          - DDBTableName
+          - DDBThroughput
+          - BackupBucketName    
+      - Label:
+          default: SageMaker Settings
+        Parameters:
+          - SagemakerBucketName
+Resources:
+  # Create a DyanmoDB Table with DDBTableName, And Read/Write Throughput DDBThroughput
+  DynamoDBTable:
+    Type: 'AWS::DynamoDB::Table'
+    Properties:
+      TableName: !Ref DDBTableName
+      AttributeDefinitions:
+        - AttributeName: ID
+          AttributeType: N
+      KeySchema:
+        - AttributeName: ID
+          KeyType: HASH
+      ProvisionedThroughput:
+        ReadCapacityUnits: !Ref DDBThroughput
+        WriteCapacityUnits: !Ref DDBThroughput
+  # Create a S3 Bucket to store our DyanmoDB backups in CSV
+  DynamoBackupBucket:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      BucketName: !Sub '${BackupBucketName}'
+  # Creating an IAM Role for our Lambda Dyanmo Backup function.  Assume role creates temporary security
+  # credentials for the lambda service (to assume your role)
+  LambdaServiceExecutionRoleDynamo:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: myLambdaDynamoBackupRole    
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+              - 'sts:AssumeRole'
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+        Version: 2012-10-17
+      Path: /
+  # We are adding some functionality to our role above, allowing our lambda function to create logs, scan our DyanmoDB table
+  # and place the output in our output bucket
+  LambdaServiceExecutionRolePolicyDynamo:
+    Type: 'AWS::IAM::Policy'
+    Properties:
+      PolicyName: myLambdaDynamoBackupRolePolicy   
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'logs:CreateLogGroup'
+              - 'logs:CreateLogStream'
+              - 'logs:PutLogEvents'
+            Resource: !Join 
+              - ''
+              - - 'arn:aws:logs:'
+                - !Ref 'AWS::Region'
+                - ':'
+                - !Ref 'AWS::AccountId'
+                - ':'
+                - 'log-group:'
+                - /aws/lambda/
+                - !Ref DDBBackup
+                - ':*'
+          - Effect: Allow
+            Action:
+              - 'dynamodb:Scan'
+              - 'dynamodb:DescribeTable'
+            Resource:
+              - !Join 
+                - ''
+                - - 'arn:aws:dynamodb:'
+                  - !Ref 'AWS::Region'
+                  - ':'
+                  - !Ref 'AWS::AccountId'
+                  - ':'
+                  - table/
+                  - !Ref DynamoDBTable
+          - Effect: Allow
+            Action:
+              - 's3:PutObject'
+            Resource:
+              - !Join 
+                - ''
+                - - 'arn:aws:s3:::'
+                  - !Ref BackupBucketName
+                  - /*
+      Roles:
+        - !Ref LambdaServiceExecutionRoleDynamo
+  # Scheduling a CloudWatch event to run once a day (backup our table once a day)
+  ScheduledEvent:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      Description: CloudWatch event to trigger lambda SG function
+      ScheduleExpression: rate(1 day)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt DDBBackup.Arn
+          Id: DDBTarget
+  # Granting permission to the cloudwatch event to invoke our lambda function
+  LambdaInvokePermissionDynamoBackup:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      FunctionName: !GetAtt DDBBackup.Arn
+      Action: 'lambda:InvokeFunction'
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ScheduledEvent.Arn
+  # Declaring our DynamoDB backup lambda function (it will use the code you've uploaded to S3)
+  DDBBackup:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Code:
+        S3Bucket: !Ref CodeBucketName
+        S3Key: !Ref DynamoBackupCodeFileName
+      Handler: backupdynamo.lambda_handler
+      MemorySize: 128
+      Role: !GetAtt LambdaServiceExecutionRoleDynamo.Arn
+      Runtime: python3.6
+      Timeout: 300
+      Environment:
+        Variables:
+          DDBTable: !Ref DynamoDBTable
+          DDBThroughput: !Ref DDBThroughput
+          BackupBucketName: !Ref BackupBucketName
+  # Creating anothe S3 bucket where all sagemaker processing can take place
+  SageMakerBucket:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      BucketName: !Sub '${SagemakerBucketName}'
+  # Creating another IAM role for our sagemaker script, allowing the sagemaker service to assume this new role
+  # Important to note is that we are attaching an AWS Managed policy AmazonSageMakerFullAccess, which will allow
+  # our lambda script to use sagemaker features like controlling an EC2 instance, create logs, auto-scale if we want
+  # and manipulate any S3 bucket that contains sagemaker in its path
+  SagemakerServiceExecutionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: mySagemakerExecutionRole
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action:
+              - 'sts:AssumeRole'
+            Effect: Allow
+            Principal:
+              Service:
+                - sagemaker.amazonaws.com
+      Path: /
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/AmazonSageMakerFullAccess'
+  # Adding one addition feature to our role, allowing our sagemaker lambda function to load backup files from
+  # our backup bucket
+  SagemakerServiceExecutionRolePolicy:
+    Type: 'AWS::IAM::Policy'
+    Properties:
+      PolicyName: mySagemakerExecutionRolePolicy
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - 's3:GetObject'
+            Resource: !Join
+              - ''
+              - - 'arn:aws:s3:::'
+                - !Sub '${BackupBucketName}'
+      Roles:
+        - !Ref SagemakerServiceExecutionRole
+Outputs:
+  DynamoDBResource:
+    Description: DynamoDB Resource ARN
+    Value: !GetAtt DynamoDBTable.Arn
+  DynamoDBTableName:
+    Description: DynamoDB Table Name
+    Value: !Ref DynamoDBTable
+  DynamoBackupBucketName:
+    Description: S3 DynamoDB CSV Backup Bucket
+    Value: !Ref BackupBucketName
+  LambdaDynamoBackupIAMRole:
+    Description: Lambda Backup IAM Role
+    Value: !Ref LambdaServiceExecutionRoleDynamo
+  CloudWatchEvent:
+    Description: CloudWatch Rule for Executing Lambda Backup Function
+    Value: !Ref ScheduledEvent
+  LambdaBackupFunction:
+    Description: Lambda Backup Function
+    Value: !Ref DDBBackup
+  SagemakerBucketName:
+    Description: S3 Bucket for Sagemaker created files
+    Value: !Ref SagemakerBucketName    
+  SagemakerExecutionIAMRole:
+    Description: Sagemaker Execution IAM Role
+    Value: !Ref SagemakerServiceExecutionRole
+  SagemakerExecutionIAMRoleArn:
+    Description: Sagemaker Execution IAM Role ARN
+    Value: !GetAtt SagemakerServiceExecutionRole.Arn
