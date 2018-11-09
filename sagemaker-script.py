@@ -122,7 +122,8 @@ def save_train_val_to_s3(sagemaker_bucket, sm_prefix, train_X, train_y, val_X, v
     smac.write_numpy_to_dense_tensor(f, train_X.astype('float32'), train_y.astype('float32'))
     f.seek(0)
 
-    s3_train_data_loc = os.path.join(sm_prefix, 'train', train_file)
+#    s3_train_data_loc = os.path.join(sm_prefix, 'train', train_file)
+    s3_train_data_loc = '/'.join([sm_prefix, 'train', train_file])
     print('Saving training data in RecordIO format to {}'.format(s3_train_data_loc))
     boto3.Session().resource('s3').Bucket(sagemaker_bucket).Object(s3_train_data_loc).upload_fileobj(f)
 
@@ -133,7 +134,8 @@ def save_train_val_to_s3(sagemaker_bucket, sm_prefix, train_X, train_y, val_X, v
     smac.write_numpy_to_dense_tensor(f, val_X.astype('float32'), val_y.astype('float32'))
     f.seek(0)
 
-    s3_validation_data_loc = os.path.join(sm_prefix, 'validation', validation_file)
+#    s3_validation_data_loc = os.path.join(sm_prefix, 'validation', validation_file)
+    s3_validation_data_loc = '/'.join([sm_prefix, 'validation', validation_file])
     print('Saving validation data in RecordIO format to {}'.format(s3_validation_data_loc))
     boto3.Session().resource('s3').Bucket(sagemaker_bucket).Object(s3_validation_data_loc).upload_fileobj(f)
 
